@@ -11,6 +11,7 @@
 ![Min SDK](https://img.shields.io/badge/minSdk-26-3DDC84?logo=android&logoColor=white)
 ![Target SDK](https://img.shields.io/badge/targetSdk-36-3DDC84?logo=android&logoColor=white)
 ![No ads](https://img.shields.io/badge/ads-none-10B981)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 </div>
 
@@ -145,7 +146,7 @@ Each record keeps its raw `tnf` / `typeHex` / `idHex` / `payloadHex`, so a saved
 ### Build & run
 
 ```bash
-git clone https://github.com/yohannestz/MyNFC.git
+git clone https://github.com/YohannesTz/MyNFC.git
 cd MyNFC
 ./gradlew installDebug
 ```
@@ -233,5 +234,4 @@ Issues and pull requests are welcome. Please describe the tag model you tested w
 
 ## License
 
-<!-- TODO: choose a license (e.g. MIT or Apache-2.0), add a LICENSE file, and update this section. -->
-License not chosen yet.
+MyNFC is released under the [MIT License](LICENSE).
