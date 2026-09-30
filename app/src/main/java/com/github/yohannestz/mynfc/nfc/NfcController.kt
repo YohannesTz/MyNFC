@@ -5,6 +5,9 @@ import android.nfc.NdefMessage
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import com.github.yohannestz.mynfc.data.TagRepository
+import com.github.yohannestz.mynfc.data.model.MemoryBlock
+import com.github.yohannestz.mynfc.data.model.RfidDump
+import com.github.yohannestz.mynfc.data.model.RfidFamily
 import com.github.yohannestz.mynfc.data.model.ScannedTag
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -15,6 +18,31 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 enum class NfcStatus { UNSUPPORTED, DISABLED, READY }
+
+/** What idle taps do: decode NDEF (default), or dump raw memory (RFID tab). */
+enum class ScanMode { NDEF, RAW }
+
+/** Raw-memory write operations, mirroring [NfcOperation] for the RFID side. */
+sealed interface RawOperation {
+    val title: String
+
+    /** Write one 16/4-byte unit at [index] on a [family] tag. */
+    data class WriteUnit(val family: RfidFamily, val index: Int, val data: ByteArray, override val title: String = "Write block") : RawOperation {
+        override fun equals(other: Any?) = other is WriteUnit && index == other.index && family == other.family && data.contentEquals(other.data)
+        override fun hashCode() = 31 * (31 * index + family.hashCode()) + data.contentHashCode()
+    }
+
+    /** Write every writable block from a saved dump onto a matching tag. */
+    data class Restore(val blocks: List<MemoryBlock>, val family: RfidFamily, override val title: String = "Restore dump") : RawOperation
+}
+
+sealed interface RawSessionState {
+    data object Idle : RawSessionState
+    data class Waiting(val operation: RawOperation, val hint: String) : RawSessionState
+    data class Working(val operation: RawOperation, val progress: Float = 0f) : RawSessionState
+    data class Success(val operation: RawOperation, val message: String) : RawSessionState
+    data class Failed(val operation: RawOperation, val message: String) : RawSessionState
+}
 
 sealed interface NfcOperation {
     val title: String
@@ -50,6 +78,15 @@ class NfcController(private val repository: TagRepository) {
     private val _readErrors = MutableSharedFlow<String>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val readErrors: SharedFlow<String> = _readErrors.asSharedFlow()
 
+    // --- Raw (RFID) side ---
+    @Volatile var scanMode: ScanMode = ScanMode.NDEF
+
+    private val _rawSession = MutableStateFlow<RawSessionState>(RawSessionState.Idle)
+    val rawSession: StateFlow<RawSessionState> = _rawSession.asStateFlow()
+
+    private val _scannedDumps = MutableSharedFlow<RfidDump>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val scannedDumps: SharedFlow<RfidDump> = _scannedDumps.asSharedFlow()
+
     @Volatile private var cloneSource: Pair<String, NdefMessage>? = null
 
     fun status(context: Context): NfcStatus {
@@ -67,14 +104,74 @@ class NfcController(private val repository: TagRepository) {
         _session.value = SessionState.Idle
     }
 
+    fun startRaw(operation: RawOperation) {
+        _rawSession.value = RawSessionState.Waiting(operation, rawHintFor(operation))
+    }
+
+    fun dismissRaw() {
+        _rawSession.value = RawSessionState.Idle
+    }
+
     /** Called on a binder thread by reader mode. */
     fun onTagDiscovered(tag: Tag) {
+        // A pending raw write takes priority over everything.
+        when (val raw = _rawSession.value) {
+            is RawSessionState.Waiting -> { performRaw(raw.operation, tag); return }
+            is RawSessionState.Failed -> { performRaw(raw.operation, tag); return }
+            else -> Unit
+        }
         when (val state = _session.value) {
-            SessionState.Idle -> read(tag)
+            SessionState.Idle -> if (scanMode == ScanMode.RAW) readRaw(tag) else read(tag)
             is SessionState.Waiting -> perform(state, tag)
             is SessionState.Failed -> perform(SessionState.Waiting(state.operation, hintFor(state.operation)), tag)
             is SessionState.Working, is SessionState.Success -> Unit
         }
+    }
+
+    private fun readRaw(tag: Tag) {
+        runCatching { RawTagReader.read(tag) }
+            .onSuccess {
+                repository.rememberDump(it)
+                _scannedDumps.tryEmit(it)
+            }
+            .onFailure { _readErrors.tryEmit("Couldn't read tag memory. Hold it still and try again.") }
+    }
+
+    private fun performRaw(op: RawOperation, tag: Tag) {
+        _rawSession.value = RawSessionState.Working(op)
+        try {
+            val message = when (op) {
+                is RawOperation.WriteUnit -> {
+                    RawTagWriter.writeUnit(tag, op.family, op.index, op.data)
+                    "Block ${op.index} written"
+                }
+                is RawOperation.Restore -> restore(op, tag)
+            }
+            _rawSession.value = RawSessionState.Success(op, message)
+        } catch (e: NfcWriteException) {
+            _rawSession.value = RawSessionState.Failed(op, e.message ?: "Write failed")
+        } catch (e: Exception) {
+            _rawSession.value = RawSessionState.Failed(op, "Unexpected error: ${e.message}")
+        }
+    }
+
+    private fun restore(op: RawOperation.Restore, tag: Tag): String {
+        val targetFamily = RawTagReader.family(tag)
+        if (targetFamily != op.family) throw NfcWriteException("Target is ${targetFamily.label}, but the dump is ${op.family.label}")
+        val writable = op.blocks.filter { it.writable && it.readable }
+        if (writable.isEmpty()) throw NfcWriteException("This dump has no writable blocks")
+        var done = 0
+        writable.forEach { block ->
+            RawTagWriter.writeUnit(tag, op.family, block.index, block.dataHex.hexToBytes())
+            done++
+            _rawSession.value = RawSessionState.Working(op, done.toFloat() / writable.size)
+        }
+        return "Restored $done block(s)"
+    }
+
+    private fun rawHintFor(op: RawOperation) = when (op) {
+        is RawOperation.WriteUnit -> "Hold the same tag to write block ${op.index}"
+        is RawOperation.Restore -> "Hold a blank ${op.family.label} tag to restore onto"
     }
 
     private fun read(tag: Tag) {

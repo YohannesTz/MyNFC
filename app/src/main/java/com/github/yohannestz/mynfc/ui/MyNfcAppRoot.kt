@@ -15,6 +15,7 @@ import androidx.compose.material.icons.rounded.Bookmarks
 import androidx.compose.material.icons.rounded.Contactless
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.Handyman
+import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -43,14 +44,20 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import com.github.yohannestz.mynfc.AppContainer
 import com.github.yohannestz.mynfc.data.model.RecordType
+import com.github.yohannestz.mynfc.nfc.RawSessionState
+import com.github.yohannestz.mynfc.nfc.ScanMode
 import com.github.yohannestz.mynfc.nfc.SessionState
 import com.github.yohannestz.mynfc.ui.common.LocalAppContainer
 import com.github.yohannestz.mynfc.ui.common.LocalSnackbar
 import com.github.yohannestz.mynfc.ui.detail.TagDetailScreen
 import com.github.yohannestz.mynfc.ui.home.HomeScreen
+import com.github.yohannestz.mynfc.ui.rfid.RfidDumpScreen
+import com.github.yohannestz.mynfc.ui.rfid.RfidScanScreen
+import com.github.yohannestz.mynfc.ui.rfid.RfidScreen
 import com.github.yohannestz.mynfc.ui.saved.SavedScreen
 import com.github.yohannestz.mynfc.ui.scan.ScanScreen
 import com.github.yohannestz.mynfc.ui.session.NfcSessionSheet
+import com.github.yohannestz.mynfc.ui.session.RawSessionSheet
 import com.github.yohannestz.mynfc.ui.tools.ToolsScreen
 import com.github.yohannestz.mynfc.ui.write.RecordEditorScreen
 import com.github.yohannestz.mynfc.ui.write.WriteScreen
@@ -62,14 +69,18 @@ import kotlin.reflect.KClass
 @Serializable data object SavedRoute
 @Serializable data object ToolsRoute
 @Serializable data object ScanRoute
+@Serializable data object RfidRoute
+@Serializable data object RfidScanRoute
+@Serializable data class RfidDumpRoute(val id: String)
 @Serializable data class DetailRoute(val id: String)
 @Serializable data class EditorRoute(val type: String, val recordId: String? = null)
 
 private data class Tab(val route: Any, val routeClass: KClass<*>, val label: String, val icon: ImageVector)
 
 private val tabs = listOf(
-    Tab(HomeRoute, HomeRoute::class, "NFC Tools", Icons.Rounded.Contactless),
+    Tab(HomeRoute, HomeRoute::class, "NFC", Icons.Rounded.Contactless),
     Tab(WriteRoute, WriteRoute::class, "Write", Icons.Rounded.EditNote),
+    Tab(RfidRoute, RfidRoute::class, "RFID", Icons.Rounded.Memory),
     Tab(SavedRoute, SavedRoute::class, "Saved", Icons.Rounded.Bookmarks),
     Tab(ToolsRoute, ToolsRoute::class, "Advanced", Icons.Rounded.Handyman),
 )
@@ -83,12 +94,29 @@ fun MyNfcAppRoot(container: AppContainer) {
     val showTabs = tabs.any { tab -> destination?.hierarchy?.any { it.hasRoute(tab.routeClass) } == true }
     val controller = container.nfcController
     val session by controller.session.collectAsStateWithLifecycle()
+    val rawSession by controller.rawSession.collectAsStateWithLifecycle()
+
+    // Idle taps decode NDEF everywhere except the RFID area, where they dump raw memory.
+    val inRfid = destination?.hierarchy?.any {
+        it.hasRoute(RfidRoute::class) || it.hasRoute(RfidScanRoute::class) || it.hasRoute(RfidDumpRoute::class)
+    } == true
+    LaunchedEffect(inRfid) {
+        controller.scanMode = if (inRfid) ScanMode.RAW else ScanMode.NDEF
+    }
 
     // Any tag read while no write operation is pending opens its details.
     LaunchedEffect(controller) {
         controller.scannedTags.collect { tag ->
             navController.navigate(DetailRoute(tag.id)) {
                 popUpTo<ScanRoute> { inclusive = true }
+                launchSingleTop = true
+            }
+        }
+    }
+    LaunchedEffect(controller) {
+        controller.scannedDumps.collect { dump ->
+            navController.navigate(RfidDumpRoute(dump.id)) {
+                popUpTo<RfidScanRoute> { inclusive = true }
                 launchSingleTop = true
             }
         }
@@ -173,6 +201,16 @@ fun MyNfcAppRoot(container: AppContainer) {
                 }
                 composable<SavedRoute> { SavedScreen(onOpen = { navController.navigate(DetailRoute(it)) }) }
                 composable<ToolsRoute> { ToolsScreen() }
+                composable<RfidRoute> {
+                    RfidScreen(
+                        onScan = { navController.navigate(RfidScanRoute) },
+                        onOpen = { navController.navigate(RfidDumpRoute(it)) },
+                    )
+                }
+                composable<RfidScanRoute> { RfidScanScreen(onClose = { navController.popBackStack() }) }
+                composable<RfidDumpRoute> { entry ->
+                    RfidDumpScreen(id = entry.toRoute<RfidDumpRoute>().id, onClose = { navController.popBackStack() })
+                }
             }
         }
 
@@ -181,6 +219,13 @@ fun MyNfcAppRoot(container: AppContainer) {
                 state = session,
                 onDismiss = controller::dismiss,
                 onRetry = { controller.start(it) },
+            )
+        }
+        if (rawSession != RawSessionState.Idle) {
+            RawSessionSheet(
+                state = rawSession,
+                onDismiss = controller::dismissRaw,
+                onRetry = { controller.startRaw(it) },
             )
         }
     }

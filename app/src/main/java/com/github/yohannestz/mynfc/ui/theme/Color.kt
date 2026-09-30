@@ -21,4 +21,5 @@ object Gradients {
     val saved = Brush.linearGradient(listOf(Emerald, Teal))
     val tools = Brush.linearGradient(listOf(Pink, Purple))
     val danger = Brush.linearGradient(listOf(Color(0xFFFF5F6D), Red))
+    val rfid = Brush.linearGradient(listOf(Indigo, Color(0xFF7C3AED), Color(0xFF3B0764)))
 }
