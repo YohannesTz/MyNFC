@@ -2,6 +2,8 @@ package com.github.yohannestz.mynfc.data
 
 import android.content.Context
 import com.github.yohannestz.mynfc.data.model.ExportBundle
+import com.github.yohannestz.mynfc.data.model.RfidBundle
+import com.github.yohannestz.mynfc.data.model.RfidDump
 import com.github.yohannestz.mynfc.data.model.ScannedTag
 import com.github.yohannestz.mynfc.data.model.WriteRecord
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +38,7 @@ class TagRepository(context: Context) {
     private val mutex = Mutex()
     private val tagsFile = File(context.filesDir, "saved_tags.json")
     private val recordsFile = File(context.filesDir, "records.json")
+    private val dumpsFile = File(context.filesDir, "rfid_dumps.json")
 
     private val _savedTags = MutableStateFlow(load(tagsFile, ListSerializer(ScannedTag.serializer())))
     val savedTags: StateFlow<List<ScannedTag>> = _savedTags.asStateFlow()
@@ -47,7 +50,41 @@ class TagRepository(context: Context) {
     private val _recent = MutableStateFlow<Map<String, ScannedTag>>(emptyMap())
     val recent: StateFlow<Map<String, ScannedTag>> = _recent.asStateFlow()
 
+    private val _savedDumps = MutableStateFlow(load(dumpsFile, ListSerializer(RfidDump.serializer())))
+    val savedDumps: StateFlow<List<RfidDump>> = _savedDumps.asStateFlow()
+
+    private val _recentDumps = MutableStateFlow<Map<String, RfidDump>>(emptyMap())
+    val recentDumps: StateFlow<Map<String, RfidDump>> = _recentDumps.asStateFlow()
+
     fun remember(tag: ScannedTag) = _recent.update { it + (tag.id to tag) }
+
+    fun rememberDump(dump: RfidDump) = _recentDumps.update { it + (dump.id to dump) }
+
+    fun findDump(id: String): RfidDump? =
+        _savedDumps.value.firstOrNull { it.id == id } ?: _recentDumps.value[id]
+
+    fun saveDump(dump: RfidDump) {
+        _savedDumps.update { list -> listOf(dump) + list.filterNot { it.id == dump.id } }
+        persistDumps()
+    }
+
+    fun deleteDump(id: String) {
+        _savedDumps.update { list -> list.filterNot { it.id == id } }
+        persistDumps()
+    }
+
+    fun exportRfidJson(dumps: List<RfidDump> = savedDumps.value): String =
+        json.encodeToString(RfidBundle.serializer(), RfidBundle(exportedAt = System.currentTimeMillis(), dumps = dumps))
+
+    /** Merges an RFID export into storage. Returns dumps imported. */
+    suspend fun importRfidJson(text: String): Int = withContext(Dispatchers.Default) {
+        val bundle = json.decodeFromString(RfidBundle.serializer(), text)
+        val ids = _savedDumps.value.map { it.id }.toSet()
+        val new = bundle.dumps.filterNot { it.id in ids }
+        _savedDumps.update { (new + it).sortedByDescending { d -> d.scannedAt } }
+        persistDumps()
+        new.size
+    }
 
     fun findTag(id: String): ScannedTag? =
         _savedTags.value.firstOrNull { it.id == id } ?: _recent.value[id]
@@ -94,6 +131,7 @@ class TagRepository(context: Context) {
 
     private fun persistTags() = persist(tagsFile, ListSerializer(ScannedTag.serializer()), _savedTags::value)
     private fun persistRecords() = persist(recordsFile, ListSerializer(WriteRecord.serializer()), _records::value)
+    private fun persistDumps() = persist(dumpsFile, ListSerializer(RfidDump.serializer()), _savedDumps::value)
 
     private fun <T> persist(file: File, serializer: KSerializer<T>, latest: () -> T) {
         scope.launch {
